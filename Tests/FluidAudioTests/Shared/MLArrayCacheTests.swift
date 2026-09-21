@@ -204,6 +204,54 @@ final class MLArrayCacheTests: XCTestCase {
 
     // Removed performance test - can cause timing issues
 
+    // MARK: - Reset Correctness
+
+    func testReturnArrayResetsPreprocessorBuffer() async throws {
+        let shape: [NSNumber] = [1, NSNumber(value: ASRConstants.maxModelSamples)]
+        let array = try await cache.getArray(shape: shape, dataType: .float32)
+        array.resetData(to: 3)
+
+        await cache.returnArray(array)
+        let cachedArray = try await cache.getArray(shape: shape, dataType: .float32)
+
+        XCTAssertTrue(cachedArray === array)
+        XCTAssertTrue((0..<cachedArray.count).allSatisfy { cachedArray[$0].floatValue == 0 })
+    }
+
+    func testReturnArrayResetsPaddedStrideArray() async throws {
+        // Poison the entire backing storage. Reset must visit every logical element and leave
+        // non-element storage unchanged, because the same helper also handles zero-copy views.
+        let shape: [NSNumber] = [10, 10]
+        let array = try await cache.getArray(shape: shape, dataType: .float32)
+        let paddingSentinel: Float = -17
+        array.withUnsafeMutableBytes { bytes, _ in
+            bytes.bindMemory(to: Float.self).update(repeating: paddingSentinel)
+        }
+        for i in 0..<array.count {
+            array[i] = NSNumber(value: Float(i) + 1)
+        }
+
+        await cache.returnArray(array)
+        let cachedArray = try await cache.getArray(shape: shape, dataType: .float32)
+
+        XCTAssertTrue(cachedArray === array)
+        for i in 0..<cachedArray.count {
+            XCTAssertEqual(cachedArray[i].floatValue, 0.0, "Element \(i) should be zero")
+        }
+        cachedArray.withUnsafeBytes { bytes in
+            let values = bytes.bindMemory(to: Float.self)
+            XCTAssertGreaterThan(values.count, cachedArray.count, "The aligned layout should carry padding")
+            let strides = cachedArray.strides.map { $0.intValue }
+            let logicalOffsets = Set((0..<10).flatMap { row in
+                (0..<10).map { column in row * strides[0] + column * strides[1] }
+            })
+            for i in values.indices {
+                let expected: Float = logicalOffsets.contains(i) ? 0 : paddingSentinel
+                XCTAssertEqual(values[i], expected, "Unexpected storage value at offset \(i)")
+            }
+        }
+    }
+
     // MARK: - Global Cache Tests
 
     func testSharedCacheInstance() async throws {

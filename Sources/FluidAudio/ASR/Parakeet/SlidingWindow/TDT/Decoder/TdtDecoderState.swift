@@ -96,15 +96,81 @@ public struct TdtDecoderState: Sendable {
 }
 
 extension MLMultiArray {
+    private var scalarByteCount: Int? {
+        switch dataType {
+        case .float16: return MemoryLayout<Float16>.stride
+        case .float32: return MemoryLayout<Float>.stride
+        case .float64: return MemoryLayout<Double>.stride
+        case .int32: return MemoryLayout<Int32>.stride
+        default: return nil
+        }
+    }
+
+    private func hasContiguousElements(strides: [Int]) -> Bool {
+        guard strides.count == shape.count else { return false }
+        var expected = 1
+        for dimension in shape.indices.reversed() {
+            let size = shape[dimension].intValue
+            guard size > 0, size == 1 || strides[dimension] == expected else { return false }
+            expected *= size
+        }
+        return true
+    }
+
+    /// Fills logical elements, preserving storage outside a strided or padded view.
     func resetData(to value: NSNumber) {
+        let filled = withUnsafeMutableBytes { bytes, storageStrides -> Bool in
+            guard hasContiguousElements(strides: storageStrides), let scalarBytes = scalarByteCount,
+                count * scalarBytes <= bytes.count, let base = bytes.baseAddress
+            else {
+                return false
+            }
+            let elements = UnsafeMutableRawBufferPointer(start: base, count: count * scalarBytes)
+            if value == 0 {
+                memset(base, 0, elements.count)
+                return true
+            }
+            switch dataType {
+            case .float32:
+                elements.bindMemory(to: Float.self).update(repeating: value.floatValue)
+            case .float64:
+                elements.bindMemory(to: Double.self).update(repeating: value.doubleValue)
+            case .int32:
+                elements.bindMemory(to: Int32.self).update(repeating: value.int32Value)
+            default:
+                return false
+            }
+            return true
+        }
+        if filled { return }
         for i in 0..<count {
             self[i] = value
         }
     }
 
+    /// Copies logical elements; contiguous arrays use memmove and other layouts snapshot values
+    /// before writing so overlapping views remain safe without copying their padding.
     func copyData(from source: MLMultiArray) {
+        if self === source { return }
+        let copied = withUnsafeMutableBytes { destination, destinationStrides -> Bool in
+            source.withUnsafeBytes { origin -> Bool in
+                guard dataType == source.dataType, shape == source.shape,
+                    hasContiguousElements(strides: destinationStrides),
+                    source.hasContiguousElements(strides: source.strides.map { $0.intValue }),
+                    let scalarBytes = scalarByteCount,
+                    count * scalarBytes <= destination.count, count * scalarBytes <= origin.count,
+                    let to = destination.baseAddress, let from = origin.baseAddress
+                else {
+                    return false
+                }
+                memmove(to, from, count * scalarBytes)
+                return true
+            }
+        }
+        if copied { return }
+        let values = (0..<count).map { source[$0] }
         for i in 0..<count {
-            self[i] = source[i]
+            self[i] = values[i]
         }
     }
 }

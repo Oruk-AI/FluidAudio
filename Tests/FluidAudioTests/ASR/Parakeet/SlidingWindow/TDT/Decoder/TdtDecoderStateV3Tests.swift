@@ -183,6 +183,28 @@ final class TdtDecoderStateV3Tests: XCTestCase {
         verifyArrayHasValue(array, value: 3.14)
     }
 
+    func testMLMultiArrayResetDataInt32Value() throws {
+        let array = try MLMultiArray(shape: [4, 6], dataType: .int32)
+
+        array.resetData(to: 7)
+
+        for i in 0..<array.count {
+            XCTAssertEqual(array[i].intValue, 7, "Array should hold 7 at index \(i)")
+        }
+    }
+
+    func testMLMultiArrayResetDataFloat16Value() throws {
+        let array = try MLMultiArray(shape: [3, 5], dataType: .float16)
+
+        array.resetData(to: 1.5)
+        for i in 0..<array.count {
+            XCTAssertEqual(array[i].floatValue, 1.5, "Array should hold 1.5 at index \(i)")
+        }
+
+        array.resetData(to: 0)
+        verifyArrayIsZero(array)
+    }
+
     func testMLMultiArrayResetDataNonFloat() throws {
         let array = try MLMultiArray(shape: [5, 3], dataType: .int32)
 
@@ -212,6 +234,165 @@ final class TdtDecoderStateV3Tests: XCTestCase {
 
         // Verify copy
         verifyArraysEqual(destArray, sourceArray)
+    }
+
+    func testMLMultiArrayCopyDataLargeArray() throws {
+        let shape: [NSNumber] = [1, NSNumber(value: ASRConstants.maxModelSamples)]
+        let sourceArray = try MLMultiArray(shape: shape, dataType: .float32)
+        let destArray = try MLMultiArray(shape: shape, dataType: .float32)
+        sourceArray.resetData(to: 3)
+        destArray.resetData(to: -1)
+
+        destArray.copyData(from: sourceArray)
+
+        XCTAssertTrue((0..<destArray.count).allSatisfy { destArray[$0].floatValue == 3 })
+    }
+
+    func testMLMultiArrayCopyDataAcrossStrideLayouts() throws {
+        // A plain array and an ANE-aligned array of the same shape have different strides;
+        // the copy must still land every element.
+        let shape: [NSNumber] = [10, 10]
+        let sourceArray = try ANEMemoryUtils.createAlignedArray(shape: shape, dataType: .float32)
+        let destArray = try MLMultiArray(shape: shape, dataType: .float32)
+        XCTAssertNotEqual(sourceArray.strides, destArray.strides)
+
+        for i in 0..<sourceArray.count {
+            sourceArray[i] = NSNumber(value: Float(i) + 0.5)
+        }
+
+        destArray.copyData(from: sourceArray)
+
+        for i in 0..<destArray.count {
+            XCTAssertEqual(destArray[i].floatValue, Float(i) + 0.5, "Element \(i) should match the source")
+        }
+    }
+
+    func testMLMultiArrayCopyDataBetweenOverlappingViews() throws {
+        // Exercise both overlap directions and every supported scalar width.
+        for dataType: MLMultiArrayDataType in [.float16, .float32, .float64, .int32] {
+            for (sourceOffset, destinationOffset) in [(0, 16), (16, 0)] {
+                let backing = try ANEMemoryUtils.createAlignedArray(shape: [1, 96], dataType: dataType)
+                for i in 0..<backing.count { backing[i] = NSNumber(value: i) }
+                let sourceView = try ANEMemoryUtils.createZeroCopyView(
+                    from: backing, offset: sourceOffset, shape: [1, 64], strides: [64, 1])
+                let destinationView = try ANEMemoryUtils.createZeroCopyView(
+                    from: backing, offset: destinationOffset, shape: [1, 64], strides: [64, 1])
+
+                withExtendedLifetime(backing) {
+                    destinationView.copyData(from: sourceView)
+                    for i in 0..<backing.count {
+                        let expected = (destinationOffset..<(destinationOffset + 64)).contains(i)
+                            ? sourceOffset + i - destinationOffset : i
+                        XCTAssertEqual(backing[i].intValue, expected)
+                    }
+                }
+            }
+        }
+    }
+
+    func testMLMultiArrayResetPreservesContiguousViewNeighbors() throws {
+        for dataType: MLMultiArrayDataType in [.float16, .float32, .float64, .int32] {
+            let backing = try ANEMemoryUtils.createAlignedArray(shape: [1, 32], dataType: dataType)
+            // The singleton dimension's stride includes storage beyond the four logical elements.
+            let view = try ANEMemoryUtils.createZeroCopyView(
+                from: backing, offset: 4, shape: [1, 4], strides: [16, 1])
+            withExtendedLifetime(backing) {
+                view.withUnsafeBytes { bytes in
+                    XCTAssertGreaterThan(bytes.count, view.count * ANEMemoryUtils.getElementSize(for: dataType))
+                }
+                for value: NSNumber in [0, 7] {
+                    for i in 0..<backing.count { backing[i] = NSNumber(value: i + 1) }
+                    view.resetData(to: value)
+                    for i in 0..<backing.count {
+                        let expected = (4..<8).contains(i) ? value.intValue : i + 1
+                        XCTAssertEqual(backing[i].intValue, expected)
+                    }
+                }
+            }
+        }
+    }
+
+    func testMLMultiArrayCopyPreservesContiguousViewNeighbors() throws {
+        for dataType: MLMultiArrayDataType in [.float16, .float32, .float64, .int32] {
+            let source = try ANEMemoryUtils.createAlignedArray(shape: [1, 32], dataType: dataType)
+            let destination = try ANEMemoryUtils.createAlignedArray(shape: [1, 32], dataType: dataType)
+            for i in 0..<32 {
+                source[i] = NSNumber(value: i + 1)
+                destination[i] = NSNumber(value: i + 100)
+            }
+            let sourceView = try ANEMemoryUtils.createZeroCopyView(
+                from: source, offset: 4, shape: [1, 4], strides: [16, 1])
+            let destinationView = try ANEMemoryUtils.createZeroCopyView(
+                from: destination, offset: 4, shape: [1, 4], strides: [16, 1])
+            withExtendedLifetime((source, destination)) {
+                destinationView.copyData(from: sourceView)
+                for i in 0..<32 {
+                    XCTAssertEqual(source[i].intValue, i + 1)
+                    XCTAssertEqual(destination[i].intValue, (4..<8).contains(i) ? i + 1 : i + 100)
+                }
+            }
+        }
+    }
+
+    func testMLMultiArrayResetPreservesStridedViewNeighbors() throws {
+        let backing = try ANEMemoryUtils.createAlignedArray(shape: [1, 8], dataType: .float32)
+        let view = try ANEMemoryUtils.createZeroCopyView(
+            from: backing, offset: 0, shape: [2, 2], strides: [4, 1])
+        withExtendedLifetime(backing) {
+            for value: NSNumber in [0, 7] {
+                for i in 0..<8 { backing[i] = NSNumber(value: Float(i + 1)) }
+                view.resetData(to: value)
+                for i in [0, 1, 4, 5] { XCTAssertEqual(backing[i], value) }
+                for i in [2, 3, 6, 7] { XCTAssertEqual(backing[i].floatValue, Float(i + 1)) }
+            }
+        }
+    }
+
+    func testMLMultiArrayCopyPreservesStridedViewNeighbors() throws {
+        let source = try ANEMemoryUtils.createAlignedArray(shape: [1, 8], dataType: .float32)
+        let destination = try ANEMemoryUtils.createAlignedArray(shape: [1, 8], dataType: .float32)
+        for i in 0..<8 {
+            source[i] = NSNumber(value: Float(i + 1))
+            destination[i] = NSNumber(value: Float(i + 100))
+        }
+        let sourceView = try ANEMemoryUtils.createZeroCopyView(
+            from: source, offset: 0, shape: [2, 2], strides: [4, 1])
+        let destinationView = try ANEMemoryUtils.createZeroCopyView(
+            from: destination, offset: 0, shape: [2, 2], strides: [4, 1])
+        withExtendedLifetime((source, destination)) {
+            destinationView.copyData(from: sourceView)
+            for i in [0, 1, 4, 5] { XCTAssertEqual(destination[i].floatValue, Float(i + 1)) }
+            for i in [2, 3, 6, 7] { XCTAssertEqual(destination[i].floatValue, Float(i + 100)) }
+        }
+    }
+
+    func testMLMultiArrayCopySnapshotsOverlappingDifferentLayouts() throws {
+        let backing = try ANEMemoryUtils.createAlignedArray(shape: [1, 8], dataType: .float32)
+        for i in 0..<8 { backing[i] = NSNumber(value: Float(i)) }
+        let source = try ANEMemoryUtils.createZeroCopyView(
+            from: backing, offset: 0, shape: [2, 2], strides: [4, 1])
+        let destination = try ANEMemoryUtils.createZeroCopyView(
+            from: backing, offset: 1, shape: [2, 2], strides: [3, 1])
+        withExtendedLifetime(backing) {
+            destination.copyData(from: source)
+            for (i, expected) in [Float(0), 1, 4, 5].enumerated() {
+                XCTAssertEqual(destination[i].floatValue, expected)
+            }
+            for i in [0, 3, 6, 7] { XCTAssertEqual(backing[i].floatValue, Float(i)) }
+        }
+    }
+
+    func testMLMultiArrayCopyDataFromItselfLeavesValues() throws {
+        let array = try MLMultiArray(shape: [2, 1, 640], dataType: .float32)
+        for i in 0..<array.count {
+            array[i] = NSNumber(value: Float(i) * 0.5)
+        }
+
+        array.copyData(from: array)
+
+        for i in stride(from: 0, to: array.count, by: 97) {
+            XCTAssertEqual(array[i].floatValue, Float(i) * 0.5, "Element \(i) should be unchanged")
+        }
     }
 
     func testMLMultiArrayCopyDataNonFloat() throws {
