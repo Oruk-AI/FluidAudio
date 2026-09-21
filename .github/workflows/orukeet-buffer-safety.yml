@@ -1,0 +1,45 @@
+name: Orukeet buffer safety
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-buffers:
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Record toolchain and revision
+        run: |
+          git rev-parse HEAD
+          xcodebuild -version
+          xcrun swift --version
+      - name: Run focused native XCTest regressions
+        # These two test classes allocate Core ML arrays only. They do not load
+        # ASR models, download weights or run network-backed integration tests.
+        run: |
+          set -o pipefail
+          xcrun swift test --configuration release --jobs 4 \
+            --filter 'TdtDecoderStateV3Tests|MLArrayCacheTests' 2>&1 \
+            | tee "$RUNNER_TEMP/orukeet-buffer-xctest.log"
+      - name: Verify production helper with native array sentinels
+        run: |
+          python3 Tools/OrukeetBufferChecks/check_buffer_helpers.py \
+            --checkout . --output "$RUNNER_TEMP/orukeet-buffer-native.json"
+      - name: Preserve safety evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: orukeet-buffer-safety
+          path: |
+            ${{ runner.temp }}/orukeet-buffer-xctest.log
+            ${{ runner.temp }}/orukeet-buffer-native.json
+          if-no-files-found: warn
+          retention-days: 14
