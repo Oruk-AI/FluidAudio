@@ -22,13 +22,13 @@ jobs:
           xcodebuild -version
           xcrun swift --version
       - name: Run focused native XCTest regressions
-        # These two test classes allocate Core ML arrays only. They do not load
+        # These test classes allocate Core ML arrays only. They do not load
         # ASR models, download weights or run network-backed integration tests.
         # Upstream test modules depend on DEBUG-only hooks, even when filtered.
         run: |
           set -o pipefail
           xcrun swift test --configuration debug --jobs 4 \
-            --filter 'TdtDecoderStateV3Tests|MLArrayCacheTests' 2>&1 \
+            --filter 'TdtDecoderStateV3Tests|MLArrayCacheTests|ANEMemoryOptimizerTests' 2>&1 \
             | tee "$RUNNER_TEMP/orukeet-buffer-xctest.log"
       - name: Verify production helper with native array sentinels
         run: |
