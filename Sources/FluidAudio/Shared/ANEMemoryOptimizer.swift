@@ -88,16 +88,19 @@ public final class ANEMemoryOptimizer {
         shape: [NSNumber],
         offset: Int = 0
     ) throws -> MLMultiArray {
-        // Ensure we have enough data
-        let sourceElements = sourceArray.shape.map { $0.intValue }.reduce(1, *)
-        let viewElements = shape.map { $0.intValue }.reduce(1, *)
-
-        guard offset + viewElements <= sourceElements else {
+        guard offset >= 0, !shape.isEmpty, shape.allSatisfy({ $0.intValue > 0 }) else {
             throw DiarizerError.invalidArrayBounds
         }
-
-        // Calculate byte offset
+        // ANE-aligned strides include padding, so logical element count is not
+        // a sufficient bound. Use the actual backing storage extent.
+        let strides = calculateOptimalStrides(for: shape, dataType: sourceArray.dataType)
+        let (viewSpan, spanOverflow) = strides[0].intValue.multipliedReportingOverflow(by: shape[0].intValue)
+        let (end, endOverflow) = offset.addingReportingOverflow(viewSpan)
         let elementSize = ANEMemoryUtils.getElementSize(for: sourceArray.dataType)
+        let storageElements = sourceArray.withUnsafeBytes { $0.count / elementSize }
+        guard !spanOverflow, !endOverflow, end <= storageElements else {
+            throw DiarizerError.invalidArrayBounds
+        }
 
         let byteOffset = offset * elementSize
         let offsetPointer = sourceArray.dataPointer.advanced(by: byteOffset)
@@ -107,7 +110,7 @@ public final class ANEMemoryOptimizer {
             dataPointer: offsetPointer,
             shape: shape,
             dataType: sourceArray.dataType,
-            strides: calculateOptimalStrides(for: shape, dataType: sourceArray.dataType),
+            strides: strides,
             deallocator: nil  // No deallocation since it's a view
         )
     }

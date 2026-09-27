@@ -4,6 +4,31 @@ import XCTest
 @testable import FluidAudio
 
 final class ANEMemoryOptimizerTests: XCTestCase {
+    func testPaddedViewCannotOverrunCompactSource() throws {
+        let source = try MLMultiArray(shape: [100], dataType: .float32)
+        XCTAssertThrowsError(try ANEMemoryOptimizer().createZeroCopyView(from: source, shape: [10, 10]))
+    }
+
+    func testPaddedViewFitsActualStorage() throws {
+        let source = try MLMultiArray(shape: [160], dataType: .float32)
+        let view = try ANEMemoryOptimizer().createZeroCopyView(from: source, shape: [10, 10])
+        view[[9, 9] as [NSNumber]] = 23
+        XCTAssertEqual(source[153].floatValue, 23)
+        XCTAssertThrowsError(try ANEMemoryOptimizer().createZeroCopyView(from: source, shape: [10, 10], offset: 1))
+        XCTAssertThrowsError(try ANEMemoryOptimizer().createZeroCopyView(from: source, shape: [1], offset: -1))
+    }
+
+    func testResetDelegatesWithoutTouchingRowPadding() throws {
+        let source = try MLMultiArray(shape: [160], dataType: .float32)
+        for i in 0..<source.count { source[i] = 77 }
+        let view = try ANEMemoryOptimizer().createZeroCopyView(from: source, shape: [10, 10])
+        view.reset(to: 3)
+        for row in 0..<10 {
+            for col in 0..<16 {
+                XCTAssertEqual(source[row * 16 + col].floatValue, col < 10 ? 3 : 77)
+            }
+        }
+    }
 
     var optimizer: ANEMemoryOptimizer!
 
